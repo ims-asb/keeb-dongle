@@ -35,7 +35,7 @@ availability) is UNVERIFIED below.
 | DYNPD pipe 0 | 0x01 | RF24 DPL_P0=0 | SRC-OK |
 | STATUS clear-all mask | 0x70 (RX_DR=6, TX_DS=5, MAX_RT=4) | RF24 | SRC-OK |
 | FIFO_STATUS RX_EMPTY | bit 0 | RF24 RX_EMPTY=0 | SRC-OK |
-| SETUP_AW = 0x03 (5-byte address) | 0x03 | RF24 setAddressWidth | not re-read in this pass | UNVERIFIED (low risk; RF24 sets 5) |
+| SETUP_AW = 0x03 (5-byte address) | 0x03 | not re-read in RF24 in this pass | UNVERIFIED (low risk) |
 | Flush RX on invalid payload width (0 or >32) | yes | RF24.cpp ~L1608 | SRC-OK |
 | Address byte order (LSByte first on SPI) | all-0xE7 so moot | - | moot for this address |
 | Power-on wait before first SPI | 100 ms | RF24 uses delay(100) on Linux path, 5 ms elsewhere; datasheet not read | UNVERIFIED (conservative) |
@@ -79,7 +79,7 @@ Checked in nrfconnect/sdk-nrf `include/esb.h` (v3.4.1) and by building against i
 | `tud_descriptor_device_qualifier_cb(void)`, `tud_descriptor_other_speed_configuration_cb(uint8_t)` | usbd.h:147,152; weak defaults return NULL (usbd.c:60-67) so a HS device without them STALLs the requests | SRC-OK |
 | `tud_hid_descriptor_report_cb`, `tud_hid_get_report_cb(instance, report_id, report_type, buffer, reqlen)`, `tud_hid_set_report_cb(instance, report_id, report_type, buffer, bufsize)` | hid_device.h:130-139 | SRC-OK |
 | `tud_hid_ready()`, `tud_hid_report(report_id, report, len)` | hid_device.h:88,100 | SRC-OK |
-| `tud_hid_report(0, ...)` with a report-ID-less descriptor sends the buffer as-is | hid_device.c not re-read in this pass | UNVERIFIED |
+| `tud_hid_report(0, ...)` sends the buffer as-is (no ID byte) when report_id==0; fails (returns false) if len > `CFG_TUD_HID_EP_BUFSIZE`, so tusb_config.h sets it to 16 for the 14-byte report. hid_device.c hardcodes rhport 0 but usbd_edpt_* substitute `_usbd_rhport`, so rhport 1 works | src/class/hid/hid_device.c:113-132, usbd.c:1382-1414 | SRC-OK |
 | `tusb_init()` with no args needs `TUD_OPT_RHPORT`; new style is `tusb_init(rhport, &(tusb_rhport_init_t){.role,.speed})` | tusb.h:142-157, tusb_types.h:321 | SRC-OK |
 | STM32F4 OTG_HS = TinyUSB rhport 1; `OTG_HS_IRQHandler` must call `tusb_int_handler(1, true)` | hw/bsp/stm32f4/family.c:45-51 | SRC-OK. **main.c had no IRQ handler** - added in board.c |
 | `tusb_time_millis_api()` is `extern` and must be provided by the app | src/common/tusb_common.h:87 | SRC-OK; added in board.c |
@@ -99,5 +99,5 @@ Checked in nrfconnect/sdk-nrf `include/esb.h` (v3.4.1) and by building against i
 | PA4 (CSN), PA6 (CE), PA7 (IRQ) as plain GPIO | | PA4 is also SPI3_NSS/I2S3_WS in pinctrl, unused | no conflict found |
 | Package: pinctrl file is for STM32F405RGTx (LQFP64); all pins above exist there | | same file | SRC-OK for RGTx. Other packages: not checked |
 | Plan conflict check: no two signals share a pin | | manual check of list | DERIVED |
-| USB3300 RESET pin, VBUS wiring, 26 MHz? crystal | not in the pin plan | see DECISIONS.md / SUMMARY.md | **hardware question for you** |
+| USB3300 RESET pin, VBUS wiring, reference clock source | not in the pin plan | see SUMMARY.md | **hardware question for you** |
 | HSE frequency of the dongle board | unknown | board.c takes `N96_HSE_HZ` at build time | UNVERIFIED assumption |
