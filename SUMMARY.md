@@ -43,7 +43,7 @@ Not done: **task 7** - the repo contains no KLE JSON or KiCad files, so there is
 - "8 kHz" is the USB polling interval request only (bInterval=1 at HS). Nothing here claims or measures end-to-end 8 kHz.
 
 ## Next
-1. Answer the hardware questions: dongle **HSE frequency**; **USB3300 RESET pin** and VBUS wiring (not in the pin plan; USB3300 needs its reset line held inactive and its 60 MHz clock present before the OTG_HS core starts); real **keyboard board** and how ZMK is built; real **VID/PID**.
+1. Answer the hardware questions: dongle **HSE frequency**; **USB3300 RESET pin** and VBUS wiring (not in the pin plan; from memory and unverified: the USB3300 needs its reset line inactive and its 60 MHz clock running before the OTG_HS core starts); real **keyboard board** and how ZMK is built; real **VID/PID**.
 2. Get the datasheets (nRF24L01+, STM32F405, USB3300) into `docs/` and re-run the UNVERIFIED rows in VERIFY.md.
 3. Bring-up order on hardware: test-mode firmware -> check `lsusb -t` shows 480M -> `tools/rate_test.py`; then radio: keyboard test app -> dongle, watching `rf_missed`.
 4. Decide the two items in DECISIONS.md; add the heartbeat/resend for stuck keys; consider the nRF24 IRQ pin for RX.
