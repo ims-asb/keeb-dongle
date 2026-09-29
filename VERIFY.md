@@ -101,3 +101,35 @@ Checked in nrfconnect/sdk-nrf `include/esb.h` (v3.4.1) and by building against i
 | Plan conflict check: no two signals share a pin | | manual check of list | DERIVED |
 | USB3300 RESET pin, VBUS wiring, reference clock source | not in the pin plan | see SUMMARY.md | **hardware question for you** |
 | HSE frequency of the dongle board | unknown | board.c takes `N96_HSE_HZ` at build time | UNVERIFIED assumption |
+
+## 5. STM32F405 clocks, SPI3, memory map (dongle/src/board.c, linker script)
+
+All of these compile against HAL v1.8.5 / CMSIS device v2.6.9 (COMPILED for
+names/macros). The *values* are from memory of the F405 family and have not
+been checked against the datasheet/reference manual (unreachable).
+
+| Item | Value | Status |
+|---|---|---|
+| SYSCLK 168 MHz: PLLM = HSE/1 MHz, PLLN 336, PLLP /2, PLLQ 7 | VCO in 1 MHz, VCO 336 MHz | UNVERIFIED (F405 max 168 MHz from memory) |
+| AHB /1, APB1 /4 (42 MHz), APB2 /2 (84 MHz) | | UNVERIFIED (APB limits 42/84 MHz from memory) |
+| Flash latency 5 wait states at 168 MHz, VOS scale 1 | `FLASH_LATENCY_5`, `PWR_REGULATOR_VOLTAGE_SCALE1` | UNVERIFIED |
+| HSE frequency | build-time `N96_HSE_HZ`, default 8 MHz | **assumption** - board unknown |
+| ULPI 60 MHz clock comes from the USB3300 on PA5, not the PLL | | UNVERIFIED (standard ULPI behaviour, from memory) |
+| SPI3 on APB1, CR1: MSTR, SSM, SSI, BR=0b010 (/8) -> 5.25 MHz, mode 0, MSB first, 8-bit | | register bit names COMPILED; BR encoding UNVERIFIED |
+| SPI DR accessed as 8-bit (`*(volatile uint8_t*)&SPI3->DR`) | | UNVERIFIED (common practice, from memory) |
+| Clock enable macros `__HAL_RCC_USB_OTG_HS_CLK_ENABLE`, `__HAL_RCC_USB_OTG_HS_ULPI_CLK_ENABLE`, `__HAL_RCC_SPI3_CLK_ENABLE` | | SRC-OK (CubeF4 example uses the first two) + COMPILED |
+| `OTG_HS_IRQn`, `OTG_HS_IRQHandler` symbol name in startup file | | COMPILED and confirmed in the linked ELF (`arm-none-eabi-nm`): our handler overrides the weak default |
+| `UID_BASE` = 0x1FFF7A10 (12-byte unique ID) | | SRC-OK (cmsis_device_f4 stm32f405xx.h) |
+| RAM 128 KiB @ 0x20000000, CCM 64 KiB @ 0x10000000, flash 1 MiB @ 0x08000000 | linker script | UNVERIFIED (memory) |
+| Startup file / system_stm32f4xx.c | cmsis_device_f4 Templates (`startup_stm32f405xx.s`) | SRC-OK, used unmodified |
+| USB3300 RESET/VBUS handling, ULPI VBUS indicator bits | not implemented | UNVERIFIED / open |
+
+## 6. What the host tests do and do not establish
+
+| Test | Establishes | Does not establish |
+|---|---|---|
+| test_protocol | packet layout (16 B, field offsets), bounds checking, seq arithmetic | that the keyboard fills it correctly |
+| test_report | NKRO descriptor describes exactly 14 report bytes (walked item by item), bit N -> usage N | that Windows/Linux/macOS accept the descriptor |
+| test_nrf24 | driver emits the exact transcript listed in the test; each assertion killed a deliberate mutation | that the transcript is right for the chip: expected bytes come from RF24, not the datasheet |
+| test_usb_descriptors | descriptor lengths chain, qualifier/other-speed present and consistent, bInterval byte = 1, string encoding | enumeration, HS negotiation |
+| test_rate_tool.py | counting/gap/wrap logic of the rate tool | behaviour against the real firmware |
