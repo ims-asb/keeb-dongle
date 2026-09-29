@@ -1,76 +1,119 @@
 /*
  * Dongle main (STM32F405 + USB3300 ULPI PHY + nRF24L01+ module).
- * Stack assumption: STM32Cube HAL + TinyUSB (device, HID, high-speed on
- * the OTG_HS port). Written against the TinyUSB API as I know it -
- * verify names against the TinyUSB version you vendor.
+ * Stack: STM32Cube HAL (clocks/GPIO) + TinyUSB 0.19.0 (device, HID,
+ * high-speed on the OTG_HS port = rhport 1). Pin plan: see board.c.
  *
- * PIN PLAN (chosen to avoid ULPI conflicts):
- *   ULPI (AF10): CK=PA5 D0=PA3 D1=PB0 D2=PB1 D3=PB10 D4=PB11 D5=PB12
- *                D6=PB13 D7=PB5 STP=PC0 DIR=PC2 NXT=PC3
- *   nRF24 on SPI3 (AF6): SCK=PC10 MISO=PC11 MOSI=PC12
- *                CSN=PA4 CE=PA6 IRQ=PA7 (IRQ optional; we poll)
- *   NOTE: SPI1's default SCK is PA5 = ULPI_CK, and SPI3's PB3-5 option
- *   collides with ULPI_D7 (PB5) - that's why SPI3 uses PC10-12.
+ * WHAT THE "8 kHz" IS: the HID endpoint's bInterval=1 at High Speed = a
+ * 125 us polling interval (see usb_descriptors.c). That is the USB leg
+ * only. The RF link sends on key *changes*; the dongle forwards the newest
+ * state at the next free endpoint slot. RF-leg latency is unmeasured, so
+ * nothing here implies end-to-end 8 kHz.
  *
- * WHAT ACTUALLY GIVES YOU 8 kHz: the HID endpoint's bInterval=1 at High
- * Speed = 125 us microframe (see usb_descriptors.c). The RF link only
- * sends on key *changes*; the dongle then sends a USB report at the next
- * microframe. Latency gain = up to 1 ms -> 0.125 ms on the USB leg.
- * (RF leg latency is separate and unmeasured.)
+ * Build with -DN96_TEST_MODE=1 for the rate-test firmware: no radio, a
+ * vendor-defined report that changes on every transfer, sent whenever the
+ * endpoint is ready (see tools/rate_test.py).
  */
 #include <string.h>
 #include "tusb.h"
+#include "board.h"
 #include "nrf24l01p.h"
-#include "hid_nkro_descriptor.h"
-#include "protocol.h"
+#include "report.h"
 
-#define N96_RF_CHANNEL 76            /* must match esb_tx.c */
+#ifndef N96_TEST_MODE
+#define N96_TEST_MODE 0
+#endif
+
+/* ------------------------------------------------------------------ */
+#if N96_TEST_MODE
+
+static uint32_t test_seq;
+
+uint16_t tud_hid_get_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t *b, uint16_t n)
+{
+    (void)i; (void)id; (void)t;
+    if (n < N96_TEST_REPORT_LEN) return 0;
+    n96_test_report(b, test_seq);
+    return N96_TEST_REPORT_LEN;
+}
+void tud_hid_set_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t const *b, uint16_t n)
+{ (void)i; (void)id; (void)t; (void)b; (void)n; }
+
+int main(void)
+{
+    board_init();
+    tusb_rhport_init_t dev_init = { .role = TUSB_ROLE_DEVICE, .speed = TUSB_SPEED_AUTO };
+    tusb_init(N96_TUD_RHPORT, &dev_init);
+
+    for (;;) {
+        tud_task();
+        if (tud_hid_ready()) {
+            uint8_t rpt[N96_TEST_REPORT_LEN];
+            n96_test_report(rpt, test_seq);
+            if (tud_hid_report(0, rpt, sizeof rpt)) test_seq++;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+#else
+
+#define N96_RF_CHANNEL 76            /* must match keyboard_esb_addon/esb_tx.c */
 static const uint8_t rf_addr[5] = { 0xE7, 0xE7, 0xE7, 0xE7, 0xE7 };
-
-/* TODO: implement in board file using HAL: SPI3 xfer, GPIO for CSN/CE. */
-extern uint8_t board_spi3_xfer(uint8_t b);
-extern void    board_nrf_csn(bool level);
-extern void    board_nrf_ce(bool level);
-extern void    board_init(void);      /* clocks, ULPI pins AF10, SPI3, GPIO */
 
 static const nrf24_hw_t nrf_hw = {
     .spi_xfer = board_spi3_xfer, .csn = board_nrf_csn, .ce = board_nrf_ce,
+    .delay_ms = board_delay_ms,
 };
 
 static uint8_t report[N96_NKRO_REPORT_LEN];
 static volatile bool report_dirty;
-static uint8_t last_seq; static bool have_seq;
+static uint8_t last_seq;
+static bool have_seq;
+static uint32_t rf_missed;          /* diagnostics: packets missed by sequence gaps */
+static bool radio_ok;
 
 static void poll_radio(void)
 {
     uint8_t buf[32];
     uint8_t len;
     while ((len = nrf24_read_payload(buf)) != 0) {
-        if (buf[0] == N96_PKT_KEY_STATE && len == sizeof(n96_key_state_packet_t)) {
-            const n96_key_state_packet_t *p = (const void *)buf;
-            /* TODO: use p->seq to count dropped packets (diagnostics). */
-            (void)last_seq; (void)have_seq;
-            report[0] = p->modifiers;
-            memcpy(&report[1], p->key_bitmask, N96_NKRO_KEY_BYTES);
+        if (n96_report_from_payload(report, buf, len)) {
+            if (have_seq) rf_missed += n96_seq_missed(last_seq, buf[1]);
+            last_seq = buf[1]; have_seq = true;
             report_dirty = true;
         }
         /* TODO: encoder / battery / heartbeat packets. */
     }
 }
 
+/* GET_REPORT (e.g. right after enumeration): answer with current state. */
+uint16_t tud_hid_get_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t *b, uint16_t n)
+{
+    (void)i; (void)id; (void)t;
+    if (n < sizeof report) return 0;
+    memcpy(b, report, sizeof report);
+    return sizeof report;
+}
+void tud_hid_set_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t const *b, uint16_t n)
+{ (void)i; (void)id; (void)t; (void)b; (void)n; /* no output report in the descriptor */ }
+
+/* Re-send current state after (re-)enumeration so the host does not keep a stale one. */
+void tud_mount_cb(void) { report_dirty = true; }
+
 int main(void)
 {
     board_init();
-    nrf24_init_prx(&nrf_hw, N96_RF_CHANNEL, rf_addr);
-    tusb_init();   /* TinyUSB config: device mode, HS on OTG_HS port - see tusb_config note */
+    radio_ok = nrf24_init_prx(&nrf_hw, N96_RF_CHANNEL, rf_addr);   /* false: module not answering */
+    tusb_rhport_init_t dev_init = { .role = TUSB_ROLE_DEVICE, .speed = TUSB_SPEED_AUTO };
+    tusb_init(N96_TUD_RHPORT, &dev_init);
 
-    while (1) {
+    for (;;) {
         tud_task();
-        poll_radio();
+        if (radio_ok) poll_radio();
         if (report_dirty && tud_hid_ready()) {
-            if (tud_hid_report(0, report, sizeof(report))) report_dirty = false;
+            if (tud_hid_report(0, report, sizeof report)) report_dirty = false;
         }
-        /* TODO: send a fresh report if the host asked (GET_REPORT) and on
-         * wake-up / re-enumeration so stuck keys are cleared. */
     }
 }
+
+#endif

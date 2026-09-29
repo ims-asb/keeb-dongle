@@ -100,4 +100,12 @@ static inline bool n96_unpack_key_state(n96_key_state_packet_t *out, const uint8
     return true;
 }
 
+/* Number of packets missed between two consecutively received sequence
+ * numbers (0 if `cur` directly follows `last`). Wraps at 256. Note: a gap of
+ * a multiple of 256 is indistinguishable from no loss. */
+static inline uint8_t n96_seq_missed(uint8_t last, uint8_t cur)
+{
+    return (uint8_t)(cur - last - 1u);
+}
+
 #endif /* N96_PROTOCOL_H */
