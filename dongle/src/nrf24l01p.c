@@ -2,9 +2,9 @@
  * Minimal nRF24L01+ driver (primary receiver, dynamic payloads, 2 Mbps,
  * 16-bit CRC, auto-ack on pipe 0) to match the keyboard's ESB_PROTOCOL_ESB_DPL.
  *
- * Register/command values are from the nRF24L01+ datasheet as I know it -
- * NOT re-verified against the PDF in this session. Cross-check the
- * register map before trusting bring-up results.
+ * Register/command values were cross-checked against nRF24/RF24
+ * nRF24L01.h (see VERIFY.md). The datasheet itself was not available, so
+ * timing values are marked there as unverified.
  */
 #include "nrf24l01p.h"
 
@@ -27,8 +27,20 @@
 #define REG_DYNPD         0x1C
 #define REG_FEATURE       0x1D
 
+#define CONFIG_EN_CRC     (1u << 3)
+#define CONFIG_CRCO       (1u << 2)
+#define CONFIG_PWR_UP     (1u << 1)
+#define CONFIG_PRIM_RX    (1u << 0)
+#define RF_SETUP_2MBPS_0DBM 0x0E   /* RF_DR_HIGH(bit3) | RF_PWR=0b11 (bits 2:1) */
+#define FEATURE_EN_DPL    (1u << 2)
+
 #define STATUS_RX_DR      0x40
+#define STATUS_IRQ_ALL    0x70
 #define FIFO_RX_EMPTY     0x01
+
+/* Delays are RF24's conservative values, not datasheet-verified. */
+#define POWER_ON_MS       100   /* wait after supply is up, before first SPI access */
+#define PWR_UP_TO_STANDBY_MS 5  /* RF24 uses 5 ms for Tpd2stby (4.5 ms worst case) */
 
 static const nrf24_hw_t *hw;
 
@@ -50,25 +62,34 @@ static uint8_t rd1(uint8_t reg)
 }
 static void cmd(uint8_t c) { hw->csn(false); hw->spi_xfer(c); hw->csn(true); }
 
-void nrf24_init_prx(const nrf24_hw_t *h, uint8_t channel, const uint8_t addr[5])
+bool nrf24_init_prx(const nrf24_hw_t *h, uint8_t channel, const uint8_t addr[5])
 {
     hw = h;
     hw->ce(false);
-    /* TODO: wait ~100 ms after power-on before first SPI access (datasheet). */
+    hw->csn(true);
+    hw->delay_ms(POWER_ON_MS);
 
-    wr1(REG_CONFIG,    0x0F);  /* PWR_UP | PRIM_RX | EN_CRC | CRCO(16-bit) */
+    /* Registers are configured while still powered down (SPI works in
+     * power-down); PWR_UP goes last so CE is only raised once in standby. */
     wr1(REG_EN_AA,     0x01);  /* auto-ack pipe 0 */
     wr1(REG_EN_RXADDR, 0x01);  /* enable pipe 0 */
     wr1(REG_SETUP_AW,  0x03);  /* 5-byte address */
     wr1(REG_RF_CH,     channel);
-    wr1(REG_RF_SETUP,  0x0E);  /* 2 Mbps, 0 dBm */
-    wr1(REG_FEATURE,   0x04);  /* EN_DPL */
+    wr1(REG_RF_SETUP,  RF_SETUP_2MBPS_0DBM);
+    wr1(REG_FEATURE,   FEATURE_EN_DPL);
     wr1(REG_DYNPD,     0x01);  /* DPL on pipe 0 */
     wr(REG_RX_ADDR_P0, addr, 5);
-    wr1(REG_STATUS,    0x70);  /* clear IRQ flags */
+    wr1(REG_STATUS,    STATUS_IRQ_ALL);
     cmd(CMD_FLUSH_RX);
     cmd(CMD_FLUSH_TX);
+
+    const uint8_t config = CONFIG_EN_CRC | CONFIG_CRCO | CONFIG_PWR_UP | CONFIG_PRIM_RX;
+    wr1(REG_CONFIG, config);
+    hw->delay_ms(PWR_UP_TO_STANDBY_MS);
+
+    bool ok = rd1(REG_CONFIG) == config && rd1(REG_RF_CH) == channel;
     hw->ce(true);              /* start listening */
+    return ok;
 }
 
 uint8_t nrf24_read_payload(uint8_t *buf)
@@ -80,7 +101,7 @@ uint8_t nrf24_read_payload(uint8_t *buf)
     uint8_t len = hw->spi_xfer(0xFF);
     hw->csn(true);
 
-    if (len == 0 || len > 32) { cmd(CMD_FLUSH_RX); return 0; } /* datasheet: flush on invalid width */
+    if (len == 0 || len > 32) { cmd(CMD_FLUSH_RX); return 0; } /* RF24 flushes on invalid width too */
 
     hw->csn(false);
     hw->spi_xfer(CMD_R_RX_PAYLOAD);

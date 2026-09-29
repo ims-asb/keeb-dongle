@@ -3,41 +3,46 @@
  * Enhanced ShockBurst (ESB), NOT Gazell.
  *
  * WHY ESB: the dongle uses an nRF24L01+ module, which speaks ESB in
- * hardware. Nordic's docs state the nRF5 ESB library is on-air
- * compatible with nRF24L devices (use the ESB legacy config for
- * compatibility). Gazell is a different protocol - an earlier draft of
- * this project used it by mistake.
+ * hardware. Nordic's NCS docs say the ESB library can talk to nRF24L
+ * devices; the documented compatibility recipe is ESB_LEGACY_CONFIG
+ * (fixed payload, 8-bit CRC, nRFgo-SDK style). This file instead uses
+ * dynamic payload + 16-bit CRC, which the nRF24L01+ also implements, but
+ * that exact combination is NOT documented as tested against nRF24
+ * hardware - see VERIFY.md.
  *
- * API names (esb_init, esb_write_payload, esb_set_base_address_0,
- * esb_set_prefixes, esb_set_rf_channel, struct esb_payload/esb_config)
- * are from the nRF Connect SDK ESB docs. Field names inside the structs
- * and the exact Kconfig (CONFIG_ESB=y, legacy-compat option) should be
- * checked against the SDK version you actually build with.
+ * API and struct field names were checked against nrfconnect/sdk-nrf
+ * include/esb.h (v3.4.1 == main at the time of checking). Kconfig needed:
+ * CONFIG_ESB=y, CONFIG_ESB_CLOCK_INIT=y (starts HFCLK inside esb_init).
  *
- * STATUS: untested skeleton. Whether this can share the nRF52840 with
- * ZMK's Bluetooth stack is still an open question (radio time-slicing).
+ * STATUS: compiles only (see SUMMARY.md); never run. Whether this can
+ * share the nRF52840 with ZMK's Bluetooth stack is an open problem -
+ * see DECISIONS.md.
  */
 #include <zephyr/kernel.h>
 #include <esb.h>
 #include <string.h>
-#include "protocol.h"
+#include "esb_tx.h"
 
-// Must match the dongle's nRF24L01+ RX_ADDR_P0 (5 bytes) and channel.
-// All-equal bytes on purpose: avoids byte-order mismatches between the
-// nRF5 ESB address registers and the nRF24 address registers.
+/* Must match the dongle's nRF24L01+ RX_ADDR_P0 (5 bytes) and channel.
+ * All-equal bytes on purpose: avoids byte-order mismatches between the
+ * nRF5 ESB address registers and the nRF24 address registers. */
 #define N96_ADDR_BYTE   0xE7
 #define N96_RF_CHANNEL  76   /* TODO: pick a quiet channel; must match dongle */
 
 static struct esb_payload tx_payload;
 static uint8_t seq_counter;
 
-static void esb_event_handler(struct esb_evt const *event)
+static void n96_esb_evt_cb(struct esb_evt const *event)
 {
     switch (event->evt_id) {
     case ESB_EVENT_TX_SUCCESS:
         break;                    /* dongle ACKed */
     case ESB_EVENT_TX_FAILED:
-        esb_flush_tx();           /* drop stale state; a fresh one follows */
+        /* The failed payload stays at the head of the TX FIFO; flush it.
+         * NOTE: this drops that state update. If it was the last key-release
+         * the dongle keeps the key held until the next packet - see
+         * DECISIONS.md (no heartbeat/resend yet). */
+        esb_flush_tx();
         break;
     default:
         break;
@@ -52,7 +57,7 @@ int n96_esb_init(void)
     config.mode          = ESB_MODE_PTX;
     config.bitrate       = ESB_BITRATE_2MBPS;
     config.crc           = ESB_CRC_16BIT;          /* nRF24 CRCO=1 */
-    config.event_handler = esb_event_handler;
+    config.event_handler = n96_esb_evt_cb;
     config.retransmit_count = 3;                   /* TODO: tune */
     config.selective_auto_ack = false;
 
@@ -61,25 +66,22 @@ int n96_esb_init(void)
 
     uint8_t base[4]   = { N96_ADDR_BYTE, N96_ADDR_BYTE, N96_ADDR_BYTE, N96_ADDR_BYTE };
     uint8_t prefix[1] = { N96_ADDR_BYTE };
-    esb_set_base_address_0(base);
-    esb_set_prefixes(prefix, 1);
-    esb_set_rf_channel(N96_RF_CHANNEL);
-    return 0;
+    err = esb_set_base_address_0(base);
+    if (err) { return err; }
+    err = esb_set_prefixes(prefix, 1);
+    if (err) { return err; }
+    return esb_set_rf_channel(N96_RF_CHANNEL);
 }
 
 /* Call whenever the key state changes (event-driven, not on a timer). */
-int n96_esb_send_keys(uint8_t modifiers, const uint8_t key_bitmask[13])
+int n96_esb_send_keys(uint8_t modifiers, const uint8_t key_bitmask[N96_KEY_BITMASK_BYTES])
 {
-    n96_key_state_packet_t pkt = {
-        .type = N96_PKT_KEY_STATE,
-        .seq = seq_counter++,
-        .modifiers = modifiers,
-    };
-    memcpy(pkt.key_bitmask, key_bitmask, sizeof(pkt.key_bitmask));
+    n96_key_state_packet_t pkt;
+    size_t len = n96_pack_key_state(&pkt, seq_counter++, modifiers, key_bitmask);
 
-    tx_payload.length = sizeof(pkt);
+    tx_payload.length = len;
     tx_payload.pipe   = 0;
     tx_payload.noack  = false;
-    memcpy(tx_payload.data, &pkt, sizeof(pkt));
+    memcpy(tx_payload.data, &pkt, len);
     return esb_write_payload(&tx_payload);
 }

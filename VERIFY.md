@@ -1,0 +1,103 @@
+# VERIFY.md - every register value, API name and pin, with its source
+
+Status legend
+- **SRC-OK**   matches the named open-source reference (file cited). Not the datasheet.
+- **COMPILED** the name/struct resolves in a real build against the pinned version.
+- **DERIVED**  computed from SRC-OK values (arithmetic shown).
+- **UNVERIFIED** no source was available; taken from memory or assumed. Do not trust.
+- **HW-ONLY**  can only be settled on hardware.
+
+Reference versions actually used (shallow clones, 2026-09-29):
+RF24 = nRF24/RF24 master; TinyUSB = hathach/tinyusb tag 0.19.0;
+NCS = nrfconnect/sdk-nrf v3.4.1 (esb.h byte-identical to main);
+HAL = STMicroelectronics/stm32f4xx_hal_driver + cmsis_device_f4 (master);
+CubeF4 example = Projects/STM324x9I_EVAL/Applications/USB_Device/HID_Standalone;
+pinctrl = zephyrproject-rtos/hal_stm32 dts/st/f4/stm32f405rgtx-pinctrl.dtsi (generated from ST's CubeMX DB).
+
+**No datasheets were reachable** (nordicsemi.com, st.com, microchip.com all blocked
+by the sandbox proxy; `docs/` is absent from the repo). Anything that only a
+datasheet can settle (timing, electrical, power-up sequence, package pin
+availability) is UNVERIFIED below.
+
+## 1. nRF24L01+ (dongle/src/nrf24l01p.c)
+
+| Item | Value in code | Source | Status |
+|---|---|---|---|
+| R_REGISTER / W_REGISTER | 0x00 / 0x20 | RF24 nRF24L01.h | SRC-OK |
+| R_RX_PL_WID | 0x60 | RF24 nRF24L01.h | SRC-OK |
+| R_RX_PAYLOAD | 0x61 | RF24 nRF24L01.h | SRC-OK |
+| FLUSH_TX / FLUSH_RX | 0xE1 / 0xE2 | RF24 nRF24L01.h | SRC-OK |
+| CONFIG, EN_AA, EN_RXADDR, SETUP_AW, RF_CH, RF_SETUP, STATUS | 0x00,0x01,0x02,0x03,0x05,0x06,0x07 | RF24 nRF24L01.h | SRC-OK |
+| RX_ADDR_P0, FIFO_STATUS, DYNPD, FEATURE | 0x0A, 0x17, 0x1C, 0x1D | RF24 nRF24L01.h | SRC-OK |
+| CONFIG bits EN_CRC=3, CRCO=2, PWR_UP=1, PRIM_RX=0 | 0x0F = all four | RF24 bit mnemonics | SRC-OK / DERIVED (8+4+2+1) |
+| RF_SETUP 2 Mbps, 0 dBm | 0x0E | RF_DR_HIGH=bit3 (0x08), RF_DR_LOW=bit5 must be 0, RF_PWR=bits2:1 both set (0x06); RF24 nRF24L01.h + RF24.cpp setDataRate | DERIVED (0x08+0x06) |
+| FEATURE EN_DPL | 0x04 (bit 2) | RF24 nRF24L01.h EN_DPL=2 | SRC-OK |
+| DYNPD pipe 0 | 0x01 | RF24 DPL_P0=0 | SRC-OK |
+| STATUS clear-all mask | 0x70 (RX_DR=6, TX_DS=5, MAX_RT=4) | RF24 | SRC-OK |
+| FIFO_STATUS RX_EMPTY | bit 0 | RF24 RX_EMPTY=0 | SRC-OK |
+| SETUP_AW = 0x03 (5-byte address) | 0x03 | RF24 setAddressWidth | not re-read in this pass | UNVERIFIED (low risk; RF24 sets 5) |
+| Flush RX on invalid payload width (0 or >32) | yes | RF24.cpp ~L1608 | SRC-OK |
+| Address byte order (LSByte first on SPI) | all-0xE7 so moot | - | moot for this address |
+| Power-on wait before first SPI | 100 ms | RF24 uses delay(100) on Linux path, 5 ms elsewhere; datasheet not read | UNVERIFIED (conservative) |
+| PWR_UP -> standby before CE high | 5 ms | RF24_POWERUP_DELAY = 5000 us (RF24_config.h) | SRC-OK for RF24; datasheet value UNVERIFIED |
+| SPI mode 0, MSB first, max 10 MHz | mode 0, 5.25 MHz | RF24_SPI_SPEED 10000000 (RF24_config.h); SPI mode from memory | speed SRC-OK, mode UNVERIFIED |
+| Init read-back (CONFIG, RF_CH) | added in this pass | design choice | HW-ONLY (tested only against a mock) |
+
+Change made after checking: the old init wrote CONFIG (PWR_UP|PRIM_RX) first
+with no delay and raised CE immediately. Now registers are written while
+powered down, PWR_UP last, then a 5 ms wait, then CE high, plus a read-back.
+
+## 2. ESB, keyboard side (keyboard_esb_addon/esb_tx.c)
+
+Checked in nrfconnect/sdk-nrf `include/esb.h` (v3.4.1) and by building against it.
+
+| Name | Status |
+|---|---|
+| `esb_init`, `esb_write_payload`, `esb_flush_tx`, `esb_set_base_address_0`, `esb_set_prefixes(const uint8_t*, uint8_t)`, `esb_set_rf_channel(uint32_t)` | SRC-OK + COMPILED |
+| `struct esb_config` fields: `protocol, mode, event_handler, bitrate, crc, tx_output_power, retransmit_delay, retransmit_count, tx_mode, payload_length, selective_auto_ack, use_fast_ramp_up` (used: protocol, mode, bitrate, crc, event_handler, retransmit_count, selective_auto_ack) | SRC-OK + COMPILED |
+| `struct esb_payload` fields `length, pipe, rssi, noack, pid, data[]` (used: length, pipe, noack, data) | SRC-OK + COMPILED |
+| Enums `ESB_PROTOCOL_ESB_DPL, ESB_MODE_PTX, ESB_BITRATE_2MBPS, ESB_CRC_16BIT`, events `ESB_EVENT_TX_SUCCESS/TX_FAILED` | SRC-OK + COMPILED |
+| `ESB_DEFAULT_CONFIG` exists (DPL, 2 Mbps, CRC16, retransmit_delay=600, count=3) | SRC-OK |
+| `ESB_LEGACY_CONFIG` = `ESB_PROTOCOL_ESB` (fixed payload) + `ESB_CRC_8BIT` | SRC-OK; **not what esb_tx.c uses** |
+| Bug found by compiling: local `esb_event_handler` collided with the `esb_event_handler` typedef in esb.h | fixed (renamed `n96_esb_evt_cb`) |
+| Kconfig `CONFIG_ESB=y`, `CONFIG_ESB_CLOCK_INIT=y` (starts HFCLK in esb_init) | SRC-OK (subsys/esb/Kconfig, samples/esb/esb_ptx/prj.conf) + COMPILED |
+| `esb_flush_tx()` / `esb_write_payload()` are legal from the event handler | handler runs from a software event interrupt with state IDLE (esb.c ~L2235); sample calls flush_tx outside the handler. Plausible, UNVERIFIED on target |
+| nRF5-ESB <-> nRF24L01+ on-air compatibility | NCS doc (doc/nrf/protocols/esb/index.rst): "compatible with nRF24L Series"; recipe given is `ESB_LEGACY_CONFIG`. DPL + CRC16 is what the nRF24L01+ hardware supports, but the docs do not say that exact combo was tested. **HW-ONLY** |
+| Address: base0 = E7E7E7E7 + prefix E7 = 5x0xE7; doc says ESB rearranges bytes to match nRF24L | all-equal bytes so byte order is moot. HW-ONLY |
+| `retransmit_delay` semantics: start-to-start, unlike nRF24 (end-to-start) | SRC-OK (docs). Only matters for PTX; the nRF24 is the PRX |
+| Build board used for the compile check | `nrf52840dk/nrf52840`, gnuarmemb (apt gcc 13.2.1), `--no-sysbuild` - the real keyboard board is unknown | COMPILED for that board only |
+
+## 3. TinyUSB (dongle/src/usb_descriptors.c, main.c) - tag 0.19.0
+
+| Name | Where | Status |
+|---|---|---|
+| `TUD_CONFIG_DESCRIPTOR(config_num, itfcount, stridx, total_len, attribute, power_ma)` | src/device/usbd.h:221 | SRC-OK |
+| `TUD_HID_DESCRIPTOR(itfnum, stridx, boot_protocol, report_desc_len, epin, epsize, ep_interval)` | usbd.h:300 | SRC-OK |
+| `TUD_CONFIG_DESC_LEN`=9, `TUD_HID_DESC_LEN`=25 | usbd.h:218,296 | SRC-OK |
+| `TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP` | src/common/tusb_types.h:255 | SRC-OK |
+| `tud_descriptor_device_cb`, `_configuration_cb(uint8_t)`, `_string_cb(uint8_t, uint16_t)` | usbd.h:129-137 | SRC-OK |
+| `tud_descriptor_device_qualifier_cb(void)`, `tud_descriptor_other_speed_configuration_cb(uint8_t)` | usbd.h:147,152; weak defaults return NULL (usbd.c:60-67) so a HS device without them STALLs the requests | SRC-OK |
+| `tud_hid_descriptor_report_cb`, `tud_hid_get_report_cb(instance, report_id, report_type, buffer, reqlen)`, `tud_hid_set_report_cb(instance, report_id, report_type, buffer, bufsize)` | hid_device.h:130-139 | SRC-OK |
+| `tud_hid_ready()`, `tud_hid_report(report_id, report, len)` | hid_device.h:88,100 | SRC-OK |
+| `tud_hid_report(0, ...)` with a report-ID-less descriptor sends the buffer as-is | hid_device.c not re-read in this pass | UNVERIFIED |
+| `tusb_init()` with no args needs `TUD_OPT_RHPORT`; new style is `tusb_init(rhport, &(tusb_rhport_init_t){.role,.speed})` | tusb.h:142-157, tusb_types.h:321 | SRC-OK |
+| STM32F4 OTG_HS = TinyUSB rhport 1; `OTG_HS_IRQHandler` must call `tusb_int_handler(1, true)` | hw/bsp/stm32f4/family.c:45-51 | SRC-OK. **main.c had no IRQ handler** - added in board.c |
+| `tusb_time_millis_api()` is `extern` and must be provided by the app | src/common/tusb_common.h:87 | SRC-OK; added in board.c |
+| HS enumeration needs `CFG_TUD_MAX_SPEED = OPT_MODE_HIGH_SPEED` (else default) | tusb_option.h:245-357 | SRC-OK |
+| dwc2 driver reads PHY type (ULPI) from GHWCFG2 itself; nothing to set for ULPI on F4 | dwc2_common.c:115,150; dwc2_stm32.h:186-260 | SRC-OK (reading) - behaviour HW-ONLY |
+| VBUS handling in ULPI mode (B-session valid) on F4 via USB3300 | not investigated | UNVERIFIED |
+| HS interrupt endpoint: wMaxPacketSize 16, bInterval=1 => 2^(1-1) = 1 microframe = 125 us | USB 2.0 spec (from memory) | UNVERIFIED (no spec in sandbox); standard and widely known |
+
+## 4. STM32F405 pins (dongle/src/board.c) and the pin plan in main.c
+
+| Signal | Pin / AF | Source | Status |
+|---|---|---|---|
+| ULPI CK PA5, D0 PA3, D1 PB0, D2 PB1, D3 PB10, D4 PB11, D5 PB12, D6 PB13, D7 PB5, STP PC0 - all AF10 | | CubeF4 HID_Standalone usbd_conf.c (STM324x9I_EVAL, F429) + hal_stm32 F405RGTx pinctrl (`STM32_PINMUX(..., AF10)`) | SRC-OK (two sources; not datasheet) |
+| ULPI DIR PC2, NXT PC3 - AF10 | | hal_stm32 F405RGTx pinctrl only. The Cube example uses PI11 / PH4 (176-pin F429 pins) which do not exist on F405 LQFP64 | SRC-OK (one source) |
+| `GPIO_AF10_OTG_HS` = 0x0A, `GPIO_AF6_SPI3` = 0x06 | | stm32f4xx_hal_gpio_ex.h | SRC-OK |
+| SPI3 SCK PC10, MISO PC11, MOSI PC12 - AF6 | | hal_stm32 F405RGTx pinctrl | SRC-OK |
+| PA4 (CSN), PA6 (CE), PA7 (IRQ) as plain GPIO | | PA4 is also SPI3_NSS/I2S3_WS in pinctrl, unused | no conflict found |
+| Package: pinctrl file is for STM32F405RGTx (LQFP64); all pins above exist there | | same file | SRC-OK for RGTx. Other packages: not checked |
+| Plan conflict check: no two signals share a pin | | manual check of list | DERIVED |
+| USB3300 RESET pin, VBUS wiring, 26 MHz? crystal | not in the pin plan | see DECISIONS.md / SUMMARY.md | **hardware question for you** |
+| HSE frequency of the dongle board | unknown | board.c takes `N96_HSE_HZ` at build time | UNVERIFIED assumption |
