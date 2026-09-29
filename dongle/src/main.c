@@ -22,7 +22,7 @@
 #include "tusb.h"
 #include "nrf24l01p.h"
 #include "hid_nkro_descriptor.h"
-#include "../../shared/protocol.h"
+#include "protocol.h"
 
 #define N96_RF_CHANNEL 76            /* must match esb_tx.c */
 static const uint8_t rf_addr[5] = { 0xE7, 0xE7, 0xE7, 0xE7, 0xE7 };

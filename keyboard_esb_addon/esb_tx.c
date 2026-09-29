@@ -20,7 +20,7 @@
 #include <zephyr/kernel.h>
 #include <esb.h>
 #include <string.h>
-#include "../../shared/protocol.h"
+#include "protocol.h"
 
 // Must match the dongle's nRF24L01+ RX_ADDR_P0 (5 bytes) and channel.
 // All-equal bytes on purpose: avoids byte-order mismatches between the
