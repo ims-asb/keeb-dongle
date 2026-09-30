@@ -1,35 +1,48 @@
-# Nano96 8 kHz dongle - status
+# Nano96 dongle - status
 
-Untested skeleton. Nothing here has run on hardware. Roughly 25-30% of
-the way to a first bring-up build (my estimate).
+Nothing here has run on hardware. Both firmwares compile; the hardware-free
+logic has host tests. "8 kHz" means only the USB polling interval requested
+(bInterval=1 at High Speed = 125 us), not end-to-end. Details: SUMMARY.md
+(done/verified/unverified/next), VERIFY.md (every value and its source),
+DECISIONS.md (open choices), docs/SCHEMATIC_CHECKLIST.md, docs/TESTING.md.
 
-## Architecture (current)
-keyboard nRF52840 --ESB 2.4 GHz--> dongle nRF24L01+ --SPI--> STM32F405
---ULPI--> USB3300 PHY --USB 2.0 High-Speed--> PC
+## Architecture
+keyboard nRF52840 --ESB 2.4 GHz--> dongle nRF24L01+ --SPI3--> STM32F405
+--ULPI--> USB3300 PHY --USB 2.0 High-Speed HID--> PC
 
-## Corrections made in this revision
-- **Gazell -> ESB.** The dongle radio is an nRF24L01+, which speaks
-  Enhanced ShockBurst. Nordic documents the nRF5 ESB library as on-air
-  compatible with nRF24L devices. The earlier Gazell code was the wrong
-  protocol for this hardware and was removed.
-- **SPI pin conflict.** SPI1's SCK pin (PA5) is ULPI_CK, and SPI3's
-  PB3-5 option collides with ULPI_D7 (PB5). Plan: nRF24 on SPI3 using
-  PC10/PC11/PC12, CSN=PA4, CE=PA6, IRQ=PA7. Use these in the schematic.
-- Rewrote the dongle for STM32 (HAL + TinyUSB); the nRF5-SDK dongle
-  file no longer applies.
+## Layout
+- `shared/` packet format (`protocol.h`), stuck-key logic (`keepalive.h`)
+- `dongle/` STM32F405 firmware (CMake, TinyUSB 0.19.0 + HAL, pinned by `tools/fetch_deps.sh`)
+- `keyboard_esb_addon/` nRF52840 ESB transmitter + bring-up app (NCS v3.4.1)
+- `tests/host/` gcc tests, `tools/rate_test.py` USB rate tool
 
-## Real vs. still guessed
-Verified against Nordic docs: ESB API names (esb_init,
-esb_write_payload, esb_set_base_address_0, esb_set_prefixes,
-esb_set_rf_channel), ESB_PROTOCOL_ESB_DPL, legacy-compat config exists.
-From memory, NOT re-verified: nRF24L01+ register values (cross-check the
-datasheet), TinyUSB macro/callback names, ULPI pin AF10 assignments
-(D7=PB5 still worth a datasheet check), struct field names in esb.h.
+## Working (as far as the VM can tell)
+- Dongle builds (normal and `N96_TEST_MODE`); keyboard app builds for `nrf52840dk/nrf52840` (no Bluetooth, no ZMK).
+- `board.c` (clocks, ULPI AF10, SPI3, GPIO, OTG_HS IRQ), HS device qualifier / other-speed / string descriptors.
+- NKRO report protocol plus HID boot protocol (SET_PROTOCOL): 14-byte NKRO vs 8-byte 6KRO boot report.
+- Stuck-key protection: keyboard resends state every 20 ms while a key is held or after a TX failure; dongle releases all keys after 100 ms of silence with keys held. Numbers are unmeasured guesses.
+- nRF24 driver with power-up sequencing and read-back, tested against a mock chip (exact SPI transcript).
+- Test mode firmware (vendor report, sent whenever the endpoint is ready) and `tools/rate_test.py`.
+- Host tests: protocol, keepalive, report/boot report, dongle core, nRF24, USB descriptors, rate tool.
+
+## Verified vs. still unverified
+Checked against open-source references only (RF24, TinyUSB, sdk-nrf `esb.h`,
+CubeF4, Zephyr pinctrl data), never a datasheet: none was available.
+Unverified: nRF24 timing and SPI mode, F405 clock tree and memory sizes,
+USB3300 behaviour, ESB(DPL, CRC16)<->nRF24 on-air compatibility, HS
+enumeration, boot-protocol behaviour in a real BIOS/UEFI, all RF timing.
 
 ## Open problems
-1. ESB and ZMK's Bluetooth both want the nRF52840 radio - unresolved.
-2. RF-leg latency is unmeasured; 8 kHz USB does not mean 8 kHz end-to-end.
-3. board_init (clocks, ULPI AF10 pins, SPI3, GPIO) is not written.
-4. HS device-qualifier / other-speed / string descriptors: TODO.
-5. Physical-key -> HID-usage mapping table: not built.
-6. USB VID/PID are placeholders.
+1. ESB and ZMK Bluetooth both need the one nRF52840 radio - options in DECISIONS.md, none chosen.
+2. RF-leg latency is unmeasured - measurement options in DECISIONS.md.
+3. USB3300 RESET and VBUS handling - schematic decision, options in DECISIONS.md. Firmware assumes the PHY is out of reset with its clock running, bus-powered, no VBUS sensing.
+4. nRF24 IRQ pin wired but unused (polling); evaluated, left as is (DECISIONS.md section 5).
+5. Unknown board facts: HSE frequency (build define, default 8 MHz is an assumption), real keyboard board, USB VID/PID (placeholders 0xCAFE/0x0096, test firmware 0x0097).
+6. Physical-key -> HID-usage table and matrix transform: not built (no KLE/KiCad files in the repo).
+7. ROM USB-DFU probably unavailable on the dongle (D+/D- go to the PHY, not PA11/PA12) - SWD assumed for flashing.
+
+## Known gaps
+- No LED/output report (no caps-lock etc.); SET_IDLE accepted but idle rate not honoured.
+- Boot report keys are in ascending usage order, not press order.
+- Encoder/battery/heartbeat packet types are defined but not handled by the dongle.
+- If the nRF24 doesn't answer at init, the dongle runs without radio (no retry).
