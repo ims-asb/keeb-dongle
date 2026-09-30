@@ -133,3 +133,32 @@ been checked against the datasheet/reference manual (unreachable).
 | test_nrf24 | driver emits the exact transcript listed in the test; each assertion killed a deliberate mutation | that the transcript is right for the chip: expected bytes come from RF24, not the datasheet |
 | test_usb_descriptors | descriptor lengths chain, qualifier/other-speed present and consistent, bInterval byte = 1, string encoding | enumeration, HS negotiation |
 | test_rate_tool.py | counting/gap/wrap logic of the rate tool | behaviour against the real firmware |
+
+## 7. Second-pass additions (2026-09-30)
+
+`docs/` still contains no datasheets (only TESTING.md and SCHEMATIC_CHECKLIST.md),
+so no UNVERIFIED row above could be re-checked against one. Rows below are new.
+
+| Item | Source | Status |
+|---|---|---|
+| `tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol)`; protocol is `HID_PROTOCOL_BOOT` (0) or `HID_PROTOCOL_REPORT` (1) | hid_device.h:142-143, hid.h:147-148 | SRC-OK + COMPILED (static-asserted against `N96_PROTO_*` in main.c) |
+| Interface protocol byte: `TUD_HID_DESCRIPTOR(..., HID_ITF_PROTOCOL_KEYBOARD, ...)` also sets bInterfaceSubClass=1 (boot) | usbd.h:300-302 | SRC-OK; checked by test_usb_descriptors |
+| TinyUSB starts each interface in **report** protocol ("Per Specs: default is report mode"); SET_PROTOCOL sets `protocol_mode` at the ACK stage and calls the callback; GET_PROTOCOL answers it | hid_device.c:258, 361-373 | SRC-OK |
+| SET_IDLE: `tud_hid_set_idle_cb` weak default returns true; idle rate stored, not honoured by us | hid_device.c:79-88, 346-351 | SRC-OK |
+| Boot keyboard report = 8 bytes: modifiers, reserved, 6 keycodes; ErrorRollOver = usage 0x01 in all six slots when more than six keys are down | HID spec / usage tables from memory | **UNVERIFIED** (spec not available) |
+| BIOS/UEFI actually enumerating and typing with boot protocol | - | **HW-ONLY** |
+| Windows/Linux accept an NKRO report descriptor on a boot-subclass interface (QMK-style dual mode) | from memory of common practice | **HW-ONLY** |
+| TinyUSB 0.19.0 dwc2 forces B-session valid (`GOTGCTL.BVALOEN\|BVALOVAL`), sets `DCFG.XCVRDLY` for ULPI PHYs, clears `ULPIEVBUSD/I` | dcd_dwc2.c:~405-426, dwc2_common.c:~127 | SRC-OK (reading); behaviour with the USB3300 HW-ONLY |
+| `tud_connect()` / `tud_disconnect()` exist | usbd.h:106-110 | SRC-OK |
+| `OTG_HS_VBUS` = PB13, `OTG_HS_ID` = PB12 (collide with ULPI D6/D5); `OTG_HS_SOF` = PA4; `OTG_FS` DM/DP/VBUS/ID = PA11/PA12/PA9/PA10; SWDIO PA13, SWCLK PA14 | hal_stm32 F405RGTx pinctrl | SRC-1 |
+| `k_uptime_get_32()` used for resend timing on the keyboard | Zephyr | COMPILED |
+| Stuck-key constants: resend 20 ms, dongle timeout 100 ms | our choice | **UNMEASURED guesses** (DECISIONS.md section 6) |
+| STM32 ROM USB-DFU uses OTG_FS (PA11/PA12) only; BOOT0/BOOT1(PB2) behaviour; HSE range 4-26 MHz; USB3300 pin functions and polarities | memory (ST AN2606 / datasheets unreachable) | **UNVERIFIED** - listed as MEM in SCHEMATIC_CHECKLIST.md |
+| nRF24 IRQ is active-low, module 8-pin order | memory | **UNVERIFIED** |
+
+New host tests (all pass; each key assertion killed at least one deliberate mutation):
+test_keepalive (resend pacing, retry after TX failure, wrap-safe timing, timeout predicate),
+test_core (payload -> state -> report, hold timeout, resends keep a key alive for 5 s of
+simulated time, lost-release recovery both ways, boot/report protocol switch, timeout in
+boot protocol), boot-report cases in test_report, boot subclass/protocol bytes in
+test_usb_descriptors. They show the logic; they do not show RF or USB behaviour.
