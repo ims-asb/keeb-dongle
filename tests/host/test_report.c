@@ -98,8 +98,54 @@ static void test_test_report(void)
     CHECK(1);
 }
 
+static void nkro_with(uint8_t r[N96_NKRO_REPORT_LEN], uint8_t mods, const uint8_t *usages, int n)
+{
+    memset(r, 0, N96_NKRO_REPORT_LEN);
+    r[0] = mods;
+    for (int i = 0; i < n; i++) n96_bitmask_set(&r[1], usages[i], true);
+}
+
+static void test_boot_report(void)
+{
+    uint8_t nk[N96_NKRO_REPORT_LEN], b[N96_BOOT_REPORT_LEN];
+    CHECK_EQ(N96_BOOT_REPORT_LEN, 8);
+
+    nkro_with(nk, 0, NULL, 0);                      /* idle */
+    memset(b, 0xEE, sizeof b); n96_boot_report_from_nkro(b, nk);
+    for (int i = 0; i < 8; i++) CHECK_EQ(b[i], 0);
+    CHECK(!n96_report_any_held(nk));
+
+    const uint8_t one[] = { 0x04 };
+    nkro_with(nk, 0x22, one, 1);                    /* modifiers + 'a' */
+    n96_boot_report_from_nkro(b, nk);
+    CHECK_EQ(b[0], 0x22); CHECK_EQ(b[1], 0); CHECK_EQ(b[2], 0x04);
+    for (int i = 3; i < 8; i++) CHECK_EQ(b[i], 0);
+    CHECK(n96_report_any_held(nk));
+
+    const uint8_t six[] = { 0x2C, 0x04, 0x1D, 0x28, 0x05, 0x67 };
+    nkro_with(nk, 0, six, 6);                       /* exactly six: ascending order, no rollover */
+    n96_boot_report_from_nkro(b, nk);
+    const uint8_t want6[] = { 0x04, 0x05, 0x1D, 0x28, 0x2C, 0x67 };
+    for (int i = 0; i < 6; i++) CHECK_EQ(b[2 + i], want6[i]);
+
+    const uint8_t seven[] = { 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A };
+    nkro_with(nk, 0x01, seven, 7);                  /* seven: all ErrorRollOver, modifiers kept */
+    n96_boot_report_from_nkro(b, nk);
+    CHECK_EQ(b[0], 0x01); CHECK_EQ(b[1], 0);
+    for (int i = 0; i < 6; i++) CHECK_EQ(b[2 + i], N96_BOOT_ERR_ROLLOVER);
+
+    const uint8_t low[] = { 0, 1, 2, 3 };           /* reserved/error usages are never emitted */
+    nkro_with(nk, 0, low, 4);
+    n96_boot_report_from_nkro(b, nk);
+    for (int i = 2; i < 8; i++) CHECK_EQ(b[i], 0);
+
+    nkro_with(nk, 0x80, NULL, 0);                   /* modifier-only */
+    n96_boot_report_from_nkro(b, nk);
+    CHECK_EQ(b[0], 0x80); CHECK(n96_report_any_held(nk));
+}
+
 int main(void)
 {
-    test_descriptors(); test_from_key_state(); test_from_payload(); test_test_report();
+    test_descriptors(); test_boot_report(); test_from_key_state(); test_from_payload(); test_test_report();
     TEST_MAIN_END("test_report");
 }

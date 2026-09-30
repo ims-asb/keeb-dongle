@@ -39,7 +39,8 @@
 #else
 #define REPORT_DESC      n96_nkro_hid_report_descriptor
 #define REPORT_DESC_LEN  N96_NKRO_DESCRIPTOR_LEN
-#define HID_PROTOCOL     HID_ITF_PROTOCOL_NONE   /* no boot protocol: BIOS/UEFI will not see this keyboard */
+#define HID_PROTOCOL     HID_ITF_PROTOCOL_KEYBOARD   /* boot-capable: subclass 1 / protocol 1. The host picks boot
+                                                      * or report protocol with SET_PROTOCOL; see core.c */
 #endif
 
 static tusb_desc_device_t const desc_device = {

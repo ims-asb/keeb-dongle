@@ -70,6 +70,13 @@ static void check_config(const uint8_t *c, uint8_t expect_type)
     }
     CHECK_EQ(pos, total);                            /* chain lands exactly on wTotalLength */
     CHECK_EQ(c[4], itfs);                            /* bNumInterfaces */
+    /* interface descriptor at offset 9: boot-capable keyboard in the normal build, plain vendor HID in test mode */
+#if N96_TEST_MODE
+    CHECK_EQ(c[9 + 6], 0); CHECK_EQ(c[9 + 7], 0);    /* subclass 0, protocol 0 */
+#else
+    CHECK_EQ(c[9 + 5], 3);                           /* class HID */
+    CHECK_EQ(c[9 + 6], 1); CHECK_EQ(c[9 + 7], 1);    /* boot subclass, keyboard protocol */
+#endif
     CHECK_EQ(itfs, 1); CHECK_EQ(hids, 1); CHECK_EQ(eps, 1);
 }
 
