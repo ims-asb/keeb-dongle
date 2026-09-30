@@ -1,6 +1,6 @@
-# DECISIONS.md - open problems (no option is chosen here)
+# DECISIONS.md - open decisions (no option is chosen unless stated)
 
-Two problems are deliberately left undecided. Each section lists options and
+Sections 1-5 are deliberately left undecided. Each lists options and
 their tradeoffs so the choice can be made with the costs visible. Facts are
 tagged: **[src]** read in a checked-out reference, **[mem]** from memory /
 unverified, **[unknown]** not established.
@@ -81,3 +81,109 @@ radio-RX-to-USB-report time.
 Options B (MPSL time-slicing) and C (mode switching) change RF-leg latency
 and its variance; the measurement method should be chosen with the coexistence
 option in mind, and it should be re-run after that option is chosen.
+
+---
+
+## 3. USB3300 RESET pin
+
+### What is established
+- The firmware drives **no** reset line and does not wait for the PHY clock; it
+  needs the PHY out of reset with its 60 MHz clock present when `board_init()`
+  enables the OTG_HS clocks (`dongle/src/board.c`). **[src: our code]**
+- The reset pin's polarity, minimum pulse, power-up sequencing and whether it
+  may simply be tied off: **[unknown]** - the USB3300 datasheet was not
+  available. Any statement below about polarity or timing is from memory and
+  must be checked before use.
+- No spare MCU pin is assigned to it in the current pin plan (VERIFY.md section 4).
+
+### Options
+
+| # | Option | Needs from the schematic | Firmware change | Gains | Costs / risks |
+|---|---|---|---|---|---|
+| A | **Tie RESET to its inactive level** (resistor to GND or VDD, whichever the datasheet says is inactive) | RESET net polarity; one resistor | none | No pin, no code; simplest | PHY can only be reset by power-cycling the board; relies on the PHY starting cleanly from power-up alone (**unknown** whether it does) |
+| B | **RC / supervisor power-on reset** on the pin | Polarity; an RC network or reset IC with the right output polarity and timing | none | No pin, no code; defined power-up pulse | Extra parts; timing values come from the datasheet (unknown here); no software recovery |
+| C | **MCU GPIO drives RESET** | One free GPIO (candidates must be chosen from pins the plan does not use; none reserved today); a pull to the inactive level so the line is defined while the MCU is in reset/boot | Small: configure pin, assert, wait, release, wait for PHY clock before enabling OTG_HS; TinyUSB re-init path for a later PHY reset | Deterministic start-up order; firmware can reset a wedged PHY | Uses a pin; pin state during MCU reset and ROM-bootloader must be safe; no way to *observe* the PHY clock from the MCU other than by delay (PA5 is the ULPI clock input), so a fixed delay is a guess until measured |
+| D | **Share the MCU's NRST** | Polarity of PHY reset vs NRST (active-low): if the PHY's reset is active-high, an inverter is needed | none | MCU reset also resets PHY; no dedicated pin | Inverter (maybe); PHY and MCU start together, so the "PHY clock present before core enable" ordering is not guaranteed by hardware |
+
+### To decide
+Read the datasheet's reset section (polarity, pulse width, whether an
+unconnected/tied pin is allowed), then pick. Options A/B need no firmware change.
+
+---
+
+## 4. USB3300 VBUS handling
+
+### What is established
+- TinyUSB 0.19.0's dwc2 driver **forces B-session valid** in the OTG core
+  (`GOTGCTL.BVALOEN | BVALOVAL`, `dcd_dwc2.c` `dcd_init()`), so the MCU does not
+  need VBUS status from the PHY to connect, and the driver sets `XCVRDLY` for
+  ULPI PHYs. `GUSBCFG.ULPIEVBUSD/ULPIEVBUSI` are cleared (internal VBUS
+  indicator/drive). **[src: read in tag 0.19.0]**
+- PB13 (`OTG_HS_VBUS` in FS-PHY mode) is ULPI D6 in this design; PB12
+  (`OTG_HS_ID`) is D5. There is no MCU VBUS-sense pin on the HS core. **[src: pinctrl data + CubeF4 example]**
+- `tud_connect()` / `tud_disconnect()` exist in the TinyUSB API (usbd.h) and could
+  gate the pull-up on an application signal. **[src]**
+- What the USB3300's VBUS pin needs (series resistor, capacitor, thresholds, what
+  it reports over ULPI when VBUS is absent): **[unknown]**.
+- The dongle is assumed **bus-powered**: VBUS is present whenever the board is
+  powered from the USB port. **[assumption - confirm]**
+
+### Options
+
+| # | Option | Needs from the schematic | Firmware change | Gains | Costs / risks |
+|---|---|---|---|---|---|
+| A | **VBUS straight to the PHY VBUS pin; MCU does not sense it** (matches the current TinyUSB behaviour) | Connector VBUS -> PHY VBUS pin with whatever the datasheet requires; 5 V -> 3.3 V regulator | none | Simplest; what the firmware already assumes | The device connects whether or not a host is really there (fine when bus-powered; on a bench with the board powered from a debugger and a USB cable to another supply, it would drive the pull-up with VBUS absent) |
+| B | **Divider from VBUS to a spare MCU GPIO**, gate connect/disconnect on it | A free GPIO; a divider (5 V -> <=3.3 V, or a 5 V-tolerant pin - pin tolerance **unverified**); pin not on PB13/PB12 | Small: read pin, `tud_connect()` / `tud_disconnect()`; debounce | Correct behaviour for a self-powered or dual-supply board; detects unplug | Pin + parts; boot-time ordering (VBUS already present at boot); not needed if bus-powered |
+| C | **Stop forcing B-session valid and use the PHY's ULPI VBUS reports** | PHY VBUS wired as in A | Patch/fork the vendored TinyUSB dwc2 driver (it forces the override for all MCUs); verify the F4 core honours ULPI-reported session state | No extra pin; hardware-reported state | Modifies a third-party library; unverified that it works on this core/PHY; more to test on hardware |
+
+### To decide
+Confirm the power topology (bus-powered only?), read the PHY datasheet's VBUS
+requirements, then pick. If bus-powered only, A needs no firmware change.
+
+---
+
+## 5. nRF24 IRQ pin: polling vs interrupt (evaluated, left as polling)
+
+The IRQ line is wired to PA7 (input, pull-up) but the firmware polls the FIFO
+from the main loop (`poll_radio()` -> `nrf24_read_payload()`).
+
+**Why it was not switched**: the change is easy to code and to test with the
+mock SPI, but it is not clearly worth doing now:
+- Latency: polling reads `FIFO_STATUS` on every main-loop pass, which reacts at
+  least as fast as a level check on IRQ. Gating the poll on IRQ would remove
+  SPI traffic when idle (power/bus-time), not latency. No measurement shows the
+  SPI polling costs anything yet (problem 2 is unmeasured).
+- Risk: the firmware would then *depend* on the IRQ net being wired correctly
+  and active-low (MEM: the module's IRQ is active-low), which the schematic has
+  not confirmed. A fallback timed poll avoids a dead radio but silently caps
+  worst-case latency at the fallback period if the net is wrong.
+- The nRF24 CONFIG register currently leaves TX_DS and MAX_RT unmasked (0x0F),
+  so IRQ would also assert on those flags; a PRX with auto-ack and no
+  ACK payload should not raise them, but masking them (CONFIG 0x3F) would be
+  part of the change and is unverified.
+
+### Options
+| # | Option | Gains | Costs |
+|---|---|---|---|
+| A | Keep polling (current) | Independent of IRQ wiring; lowest latency by construction | SPI read every loop pass |
+| B | Level-gate the poll on PA7, plus a fallback poll every N ms | Idle SPI traffic drops; trivially testable with a mock | Depends on IRQ wiring; fallback period becomes worst-case latency if IRQ is unwired; mask TX_DS/MAX_RT (unverified) |
+| C | EXTI falling-edge on PA7 sets a flag, main loop drains | Same benefit as B, no pin read in the loop | ISR + edge-loss handling (drain to empty, then re-check the pin) - more moving parts to verify without hardware |
+
+Revisit after the schematic confirms IRQ, and after problem 2 shows whether
+SPI polling matters.
+
+---
+
+## 6. Choices made in the second pass that you may want to revisit
+
+These were implemented (not left open) but rest on guesses:
+- **Stuck-key timing**: keyboard resends every 20 ms while a key is held (or after
+  a failed transmission); dongle releases all keys after 100 ms of silence with
+  keys held (`shared/keepalive.h`). Neither number is measured; 100 ms allows
+  about five consecutive lost resends before a false release, and a held key costs
+  about 50 packets/s of airtime and battery. The latency/reliability tradeoff
+  belongs with problem 2.
+- **Boot protocol**: ascending-usage order for the six boot keycodes (press order
+  is not kept); ErrorRollOver (0x01) in all six slots beyond six keys, as the boot
+  protocol requires (MEM: HID usage tables). SET_IDLE is accepted but the idle
+  rate is not honoured (TinyUSB stores it; we never re-send on idle).
