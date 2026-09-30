@@ -19,7 +19,10 @@ int main(void)
         n96_bitmask_set(bitmask, usage, true);
         n96_esb_send_keys(0, bitmask);
         usage = (usage >= 0x1D) ? 0x04 : usage + 1;   /* a..z */
-        k_sleep(K_MSEC(100));
+        for (int i = 0; i < 20; i++) {       /* 100 ms between key changes, ticking every 5 ms */
+            n96_esb_tick();
+            k_sleep(K_MSEC(5));
+        }
     }
     return 0;
 }

@@ -7,4 +7,6 @@
 int n96_esb_init(void);
 /* Queue a key-state frame. Call on every key change. Returns esb_write_payload()'s result. */
 int n96_esb_send_keys(uint8_t modifiers, const uint8_t key_bitmask[N96_KEY_BITMASK_BYTES]);
+/* Re-send the current state while keys are held / after a TX failure. Call every few ms. */
+void n96_esb_tick(void);
 #endif
