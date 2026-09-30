@@ -18,6 +18,7 @@
 #include "board.h"
 #include "nrf24l01p.h"
 #include "report.h"
+#include "core.h"
 
 #ifndef N96_TEST_MODE
 #define N96_TEST_MODE 0
@@ -65,11 +66,10 @@ static const nrf24_hw_t nrf_hw = {
     .delay_ms = board_delay_ms,
 };
 
-static uint8_t report[N96_NKRO_REPORT_LEN];
-static volatile bool report_dirty;
-static uint8_t last_seq;
-static bool have_seq;
-static uint32_t rf_missed;          /* diagnostics: packets missed by sequence gaps */
+_Static_assert(N96_PROTO_BOOT == HID_PROTOCOL_BOOT && N96_PROTO_REPORT == HID_PROTOCOL_REPORT,
+               "core protocol values must match TinyUSB");
+
+static n96_core_t core;
 static bool radio_ok;
 
 static void poll_radio(void)
@@ -77,32 +77,39 @@ static void poll_radio(void)
     uint8_t buf[32];
     uint8_t len;
     while ((len = nrf24_read_payload(buf)) != 0) {
-        if (n96_report_from_payload(report, buf, len)) {
-            if (have_seq) rf_missed += n96_seq_missed(last_seq, buf[1]);
-            last_seq = buf[1]; have_seq = true;
-            report_dirty = true;
-        }
+        n96_core_on_payload(&core, buf, len, board_millis());
         /* TODO: encoder / battery / heartbeat packets. */
     }
 }
 
-/* GET_REPORT (e.g. right after enumeration): answer with current state. */
+/* GET_REPORT (e.g. right after enumeration): answer with current state in
+ * the active protocol's format. */
 uint16_t tud_hid_get_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t *b, uint16_t n)
 {
     (void)i; (void)id; (void)t;
-    if (n < sizeof report) return 0;
-    memcpy(b, report, sizeof report);
-    return sizeof report;
+    uint8_t rpt[N96_NKRO_REPORT_LEN];
+    size_t len = n96_core_report(&core, rpt);
+    if (n < len) return 0;
+    memcpy(b, rpt, len);
+    return (uint16_t)len;
 }
 void tud_hid_set_report_cb(uint8_t i, uint8_t id, hid_report_type_t t, uint8_t const *b, uint16_t n)
 { (void)i; (void)id; (void)t; (void)b; (void)n; /* no output report in the descriptor */ }
 
+/* Host switched between boot (BIOS/UEFI) and report (OS driver) protocol. */
+void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol)
+{
+    (void)instance;
+    n96_core_set_protocol(&core, protocol);
+}
+
 /* Re-send current state after (re-)enumeration so the host does not keep a stale one. */
-void tud_mount_cb(void) { report_dirty = true; }
+void tud_mount_cb(void) { n96_core_mark_dirty(&core); }
 
 int main(void)
 {
     board_init();
+    n96_core_init(&core);
     radio_ok = nrf24_init_prx(&nrf_hw, N96_RF_CHANNEL, rf_addr);   /* false: module not answering */
     tusb_rhport_init_t dev_init = { .role = TUSB_ROLE_DEVICE, .speed = TUSB_SPEED_AUTO };
     tusb_init(N96_TUD_RHPORT, &dev_init);
@@ -110,8 +117,11 @@ int main(void)
     for (;;) {
         tud_task();
         if (radio_ok) poll_radio();
-        if (report_dirty && tud_hid_ready()) {
-            if (tud_hid_report(0, report, sizeof report)) report_dirty = false;
+        n96_core_tick(&core, board_millis());   /* releases stuck keys if the link goes silent */
+        if (core.dirty && tud_hid_ready()) {
+            uint8_t rpt[N96_NKRO_REPORT_LEN];
+            size_t len = n96_core_report(&core, rpt);
+            if (tud_hid_report(0, rpt, (uint16_t)len)) core.dirty = false;
         }
     }
 }

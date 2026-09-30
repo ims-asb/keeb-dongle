@@ -25,7 +25,7 @@ set(CMAKE_C_STANDARD 11)
 set(CPU_FLAGS -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
 
 set(APP_SRC
-  src/main.c src/board.c src/nrf24l01p.c src/report.c src/usb_descriptors.c)
+  src/main.c src/board.c src/nrf24l01p.c src/report.c src/core.c src/usb_descriptors.c)
 set(TUSB_SRC
   ${TUSB}/tusb.c ${TUSB}/common/tusb_fifo.c
   ${TUSB}/device/usbd.c ${TUSB}/device/usbd_control.c

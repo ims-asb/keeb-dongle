@@ -5,7 +5,7 @@ SRC      = ../../dongle/src
 INC      = -I. -I../../shared -I$(SRC)
 BUILD    = ../../build/host-tests
 
-TESTS    = test_protocol test_report test_nrf24 test_usb_descriptors test_usb_descriptors_testmode
+TESTS    = test_protocol test_keepalive test_report test_core test_nrf24 test_usb_descriptors test_usb_descriptors_testmode
 TUSB     = ../../third_party/tinyusb/src
 
 .PHONY: test clean
@@ -14,8 +14,12 @@ test: $(addprefix $(BUILD)/,$(TESTS))
 
 $(BUILD)/test_protocol: test_protocol.c ../../shared/protocol.h check.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) test_protocol.c -o $@
-$(BUILD)/test_report: test_report.c $(SRC)/report.c $(SRC)/report.h check.h | $(BUILD)
+$(BUILD)/test_keepalive: test_keepalive.c ../../shared/keepalive.h ../../shared/protocol.h check.h | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) test_keepalive.c -o $@
+$(BUILD)/test_report: test_report.c $(SRC)/report.c $(SRC)/report.h ../../shared/keepalive.h check.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) test_report.c $(SRC)/report.c -o $@
+$(BUILD)/test_core: test_core.c $(SRC)/core.c $(SRC)/core.h $(SRC)/report.c $(SRC)/report.h ../../shared/keepalive.h check.h | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) test_core.c $(SRC)/core.c $(SRC)/report.c -o $@
 $(BUILD)/test_nrf24: test_nrf24.c $(SRC)/nrf24l01p.c $(SRC)/nrf24l01p.h check.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) test_nrf24.c $(SRC)/nrf24l01p.c -o $@
 
